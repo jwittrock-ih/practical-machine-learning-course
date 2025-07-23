@@ -1,0 +1,184 @@
+---
+title: "Practical Machine Learning Course - Final Project"
+author: "Julie Wittrock"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    template: !expr knitr::opts_knit$get("template")
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+This is my final project submission for the Practical Machine Learning course by John Hopkins on Coursera. 
+
+The objective of the project was to develop a predictive model using accelerometer data to accurately classify the quality barbell lifts performed by athletes. 
+
+## Load libraries
+
+```{r libraries}
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(rattle)
+library(randomForest)
+library(corrplot)
+
+```
+
+## Load data sets
+The provided weight lifting exercise data data included data from accelerometers placed on the belt, forearm, arm, and dumbell of 6 participants. The atheletes were asked to perform barbell lifts correctly, and then incorrectly in 5 different ways. 
+
+```{r data}
+
+training_raw <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+validation   <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+
+```
+
+## Clean the training data 
+The first step is to clean the loaded training data. I took the following steps to get the data into a state where it could be analyzed: 
+
+* Converted blank string/character variables to NAs so they would be dealt with properly
+* Converted the outcome variable to a factor
+* Removed variables that had more than 95% missing values
+  + Ideally, all variables with 80% missing values would be removed, but in this data set all variables with missing data had more than 97% of missing values, so 95% was an appropriate threshold
+* Removed all non-sensor data that would not be helpful in predicting the outcome
+
+```{r clean}
+train_clean <- training_raw %>% 
+    #convert strings/character where there are blank cells with NA
+  mutate(across(where(is.character), ~na_if(trimws(.), ""))) %>% 
+    #convert outcome variable into a factor
+  mutate(classe = as.factor(classe)) 
+
+#remove variables with > 95% missing values
+missing_pct <- function(data) {
+  sapply(data, function(x) mean(is.na(x))*100)
+}
+
+vars_over_50_missing <- function(data) {
+  missing_pct <- sapply(data, function(x) mean(is.na(x))*100)
+  names(missing_pct[missing_pct >= 50])
+}
+
+##Code to see the list of variables with missing data
+#missing_pct(train_clean)
+#vars_over_50_missing(train_clean)
+
+  #all of the variables that have missing data have 97% missing data. 
+    #Safe in this case to remove more than 95% missing data, although 80% is ideal
+train_clean <- train_clean %>% 
+  select(where(~ mean(!is.na(.)) > 0.95)) 
+
+#drop non-sensor data as it will not be helpful for predicting
+train_clean <- train_clean %>% 
+  select(-c(X, user_name, raw_timestamp_part_1, raw_timestamp_part_2, cvtd_timestamp, new_window, num_window))
+
+```
+
+## Create training and testing data sets 
+Using a seed for reproducibility, I randomly split the training data into a training data set (to develop the model) and testing data set (to calculate the out of sample error). I have called the project "testing" set the validation set, for clarity. 
+
+```{r traintest}
+#create test and training data sets from the provided training data ####
+set.seed(652)
+inTrain <- createDataPartition(y = train_clean$classe, p = 0.7, list = FALSE)
+
+train <- train_clean[inTrain,]
+test  <- train_clean[-inTrain,]
+
+dim(train)
+dim(test)
+dim(validation)
+
+```
+The training set for model building comprised 70% of the entire raw training set.  
+
+## Look for highly correlated variables
+Since all of the predictive data originated from accelerometers placed on the same 6 bodies, capturing multiple measurements of the same movements, I was concerned about potential multicollinearity. To address this, I examined the correlations among the variables. 
+```{r correlation}
+#find highly correlated pairs
+
+numeric_vars <- train[, sapply(train, is.numeric)]
+cor_matrix <- cor(numeric_vars, use = "pairwise.complete.obs")
+high_corr <- findCorrelation(cor_matrix, cutoff = 0.9, names = TRUE)
+high_corr
+    #high degree of multicollinearity, so better to use a tree-based model that handles correlation better
+
+#corrplot(cor_matrix, method = "color", type = "upper", tl.cex = 0.7)
+
+```
+As expected, several variables exhibited high correlation. This multicollinearity requires careful consideration - either by removing highly correlated variables or by selecting a modelling approach that can effectively handle such data structures.  
+
+## Create model
+Random forest models are well suited for classification tasks and are generally robust to multicollinearity, making them a strong choice for this dataset. 
+
+I implemented a random forest model using 5-fold cross-validation with the random forest being comprised of 500 trees. This level of k-fold cross validation should help to ensure that the model is robust and not over-fitted to the training data. 
+
+
+``` {r model}
+#model using random forest for accuracy and interpretability 
+set.seed(892)
+
+control <- trainControl(method = "cv", number = 5)
+model_rf <- train(classe ~ ., data = train, method = "rf", trControl = control)#, ntree = 100
+
+model_rf$finalModel
+```
+The model tried 27 variables at each split and had an out-of-bag estimated error rate of 0.68% - meaning an estimated 99.32% accuracy based on the training data. 
+
+## Model results and out-of-sample error
+The next step is to use the results of the random forest model to predict the outcome on the testing data to determine it's performance, including the out-of-sample error rate. 
+``` {r predictions}
+#predictions ####
+predictions <- predict(model_rf, test) 
+conf_mat <- confusionMatrix(predictions, test$classe)
+
+#out of sample error
+oos_error <- 1 - conf_mat$overall["Accuracy"]
+#print(oos_error)
+```
+
+Below is a summary of the performance of the random forest model for both in and out of sample errors: 
+
+```{r}
+#Calculate in-sample error
+train_predictions <- predict(model_rf, train) 
+train_conf_mat <- confusionMatrix(train_predictions, train$classe) 
+in_sample_error <- 1 - train_conf_mat$overall["Accuracy"]
+#Create a comparison table
+error_df <- data.frame(
+Dataset = c("Training (In-Sample)", "Testing (Out-of-Sample)"),
+Accuracy = c(train_conf_mat$overall["Accuracy"], conf_mat$overall["Accuracy"]), Error = c(in_sample_error, oos_error)
+)
+#Display as a nice table
+knitr::kable(error_df, caption = "Comparison of In-Sample and Out-of-Sample Errors", digits = 4)
+```
+
+The model had an out-of-sample error rate of 0.71%, meaning that the model was 99.29% accurate. This is represents excellent predictive performance of the model. 
+
+## Predictions on the testing set
+
+First, the same cleaning steps were applied to the testing (validation) data set as were applied in the initial cleaning of the raw training data. 
+```{r cleantest}
+validation_clean <- validation %>% 
+  mutate(across(where(is.character), ~na_if(trimws(.), ""))) #convert strings/character where there are blank cells with NA
+
+  #all of the variables that have missing data have 97% missing data. 
+    #Safe in this case to remove more than 95% missing data, although 80% is ideal
+validation_clean <- validation_clean %>% 
+  select(where(~ mean(!is.na(.)) > 0.95)) 
+
+#drop non-sensor data as it will not be helpful for predicting
+validation_clean <- validation_clean %>% 
+  select(-c(X, user_name, raw_timestamp_part_1, raw_timestamp_part_2, cvtd_timestamp, new_window, num_window))
+```
+
+Next, use the model make predictions on the cleaned data. 
+```{r newpred}
+validation_pred <- predict(model_rf, newdata = validation_clean)
+validation_pred
+```
